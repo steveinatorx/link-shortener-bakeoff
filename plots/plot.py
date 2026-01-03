@@ -11,6 +11,7 @@ import os
 import glob
 import matplotlib.pyplot as plt
 from collections import defaultdict
+from matplotlib.ticker import FuncFormatter
 
 def load_results(results_dir="results"):
     """Load all JSON results files."""
@@ -32,6 +33,15 @@ def group_by_language(results):
         lang = r['config']['language']
         by_lang[lang].append(r)
     return by_lang
+
+def format_millions(x, pos):
+    """Format numbers as millions (e.g., 25M instead of 25000000)."""
+    if x >= 1e6:
+        return f'{x/1e6:.0f}M'
+    elif x >= 1e3:
+        return f'{x/1e3:.0f}K'
+    else:
+        return f'{x:.0f}'
 
 def plot_ops_per_sec(results, output_dir="plots/out"):
     """Plot ops_per_sec vs threads."""
@@ -58,6 +68,7 @@ def plot_ops_per_sec(results, output_dir="plots/out"):
     plt.title('Throughput vs Thread Count', fontsize=14, fontweight='bold')
     plt.legend(fontsize=11)
     plt.grid(True, alpha=0.3)
+    plt.gca().yaxis.set_major_formatter(FuncFormatter(format_millions))
     plt.tight_layout()
     
     output_path = os.path.join(output_dir, "ops_per_sec.png")
@@ -127,12 +138,14 @@ def plot_read_vs_write(results, output_dir="plots/out"):
     ax1.set_title('Read Throughput vs Thread Count', fontsize=13, fontweight='bold')
     ax1.legend(fontsize=10)
     ax1.grid(True, alpha=0.3)
+    ax1.yaxis.set_major_formatter(FuncFormatter(format_millions))
     
     ax2.set_xlabel('Number of Threads', fontsize=12)
     ax2.set_ylabel('Write Ops/sec', fontsize=12)
     ax2.set_title('Write Throughput vs Thread Count', fontsize=13, fontweight='bold')
     ax2.legend(fontsize=10)
     ax2.grid(True, alpha=0.3)
+    ax2.yaxis.set_major_formatter(FuncFormatter(format_millions))
     
     plt.tight_layout()
     output_path = os.path.join(output_dir, "read_vs_write.png")

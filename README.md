@@ -2,6 +2,8 @@
 
 A fair, reproducible performance comparison between Rust and Go for a core in-memory link shortener engine. This benchmark focuses on **core data structure operations only** - no HTTP server, no network I/O.
 
+📖 **Read the blog post**: [Rust vs Go: A Fair-ish Performance Fight using a Link Shortener App](https://medium.com/@steveinatorx_49018/rust-vs-go-a-fair-ish-performance-fight-using-a-link-shortener-app-e405a3fc3b0d)
+
 ## Overview
 
 This benchmark compares:
@@ -223,5 +225,7 @@ See `spec/benchmark.md` for more tips.
 
 ## License
 
-This is a benchmark project for performance comparison purposes.
+MIT License - see [LICENSE](LICENSE) file for details.
+
+This is a benchmark project for performance comparison purposes. Feel free to use, modify, and distribute as needed.
 
