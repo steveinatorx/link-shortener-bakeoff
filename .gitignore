@@ -1,0 +1,52 @@
+# Data and results
+data/
+results/*.json
+results/*.csv
+!results/sample_*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.env
+.venv
+env/
+venv/
+ENV/
+Pipfile.lock
+
+# Rust
+bench-rust-core/target/
+**/*.rs.bk
+Cargo.lock
+
+# Go
+bench-go-core/bench-go-core
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Plots output
+plots/out/*.png
+
+# Generated files
+*.tsv
+*.txt
+

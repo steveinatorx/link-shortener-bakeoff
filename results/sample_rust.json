@@ -1,0 +1,32 @@
+{
+  "meta": {
+    "timestamp_utc": "2024-01-15T10:30:00Z",
+    "os": "darwin",
+    "arch": "arm64",
+    "cpu_cores": 8,
+    "hostname": "example-mac"
+  },
+  "config": {
+    "language": "rust",
+    "language_version": "rustc 1.75.0",
+    "git_commit": "abc123def456",
+    "n_initial": 100000,
+    "ops_file": "data/ops.txt",
+    "read_pct": 95,
+    "dist": "uniform",
+    "threads": 8,
+    "shards": 128,
+    "seed": 12345,
+    "warmup_s": 2.0,
+    "duration_s": 10.0
+  },
+  "metrics": {
+    "ops_total": 5000000,
+    "ops_per_sec": 500000.0,
+    "latency_us_p50": 0.5,
+    "latency_us_p95": 2.1,
+    "latency_us_p99": 5.3,
+    "rss_bytes": null
+  }
+}
+

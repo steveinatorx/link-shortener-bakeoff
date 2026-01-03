@@ -1,0 +1,32 @@
+{
+  "meta": {
+    "timestamp_utc": "2024-01-15T10:30:00Z",
+    "os": "darwin",
+    "arch": "arm64",
+    "cpu_cores": 8,
+    "hostname": "example-mac"
+  },
+  "config": {
+    "language": "go",
+    "language_version": "go1.22.0",
+    "git_commit": "abc123def456",
+    "n_initial": 100000,
+    "ops_file": "data/ops.txt",
+    "read_pct": 95,
+    "dist": "uniform",
+    "threads": 8,
+    "shards": 128,
+    "seed": 12345,
+    "warmup_s": 2.0,
+    "duration_s": 10.0
+  },
+  "metrics": {
+    "ops_total": 4800000,
+    "ops_per_sec": 480000.0,
+    "latency_us_p50": 0.8,
+    "latency_us_p95": 3.2,
+    "latency_us_p99": 7.1,
+    "rss_bytes": null
+  }
+}
+
