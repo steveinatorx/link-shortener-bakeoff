@@ -200,14 +200,25 @@ func loadOps(path string) []Op {
 	return ops
 }
 
+type WorkerResults struct {
+	readHist   *Histogram
+	writeHist  *Histogram
+	readCount  uint64
+	writeCount uint64
+	totalOps   uint64
+}
+
 func worker(
 	sm *ShardedMap,
 	ops []Op,
 	startIdx, endIdx int,
 	warmupDuration, measureDuration time.Duration,
 	opsCounter *atomic.Uint64,
-) *Histogram {
-	hist := NewHistogram()
+) *WorkerResults {
+	readHist := NewHistogram()
+	writeHist := NewHistogram()
+	var localReads uint64
+	var localWrites uint64
 	var localOps uint64
 
 	warmupEnd := time.Now().Add(warmupDuration)
@@ -244,7 +255,14 @@ func worker(
 		// Convert nanoseconds to microseconds with rounding
 		ns := elapsed.Nanoseconds()
 		us := (ns + 500) / 1000 // Round to nearest microsecond
-		hist.Record(uint64(us))
+		switch op.Type {
+		case "G":
+			readHist.Record(uint64(us))
+			localReads++
+		case "S":
+			writeHist.Record(uint64(us))
+			localWrites++
+		}
 		localOps++
 
 		opIdx++
@@ -254,7 +272,13 @@ func worker(
 	}
 
 	opsCounter.Add(localOps)
-	return hist
+	return &WorkerResults{
+		readHist:   readHist,
+		writeHist:  writeHist,
+		readCount:  localReads,
+		writeCount: localWrites,
+		totalOps:   localOps,
+	}
 }
 
 func getGitCommit() string {
@@ -307,12 +331,22 @@ type Config struct {
 }
 
 type Metrics struct {
-	OpsTotal     uint64   `json:"ops_total"`
-	OpsPerSec    float64  `json:"ops_per_sec"`
-	LatencyUsP50 float64  `json:"latency_us_p50"`
-	LatencyUsP95 float64  `json:"latency_us_p95"`
-	LatencyUsP99 float64  `json:"latency_us_p99"`
-	RSSBytes     *uint64  `json:"rss_bytes,omitempty"`
+	OpsTotal          uint64   `json:"ops_total"`
+	OpsPerSec         float64  `json:"ops_per_sec"`
+	LatencyUsP50      float64  `json:"latency_us_p50"`
+	LatencyUsP95      float64  `json:"latency_us_p95"`
+	LatencyUsP99      float64  `json:"latency_us_p99"`
+	ReadsTotal        uint64   `json:"reads_total"`
+	ReadsPerSec       float64  `json:"reads_per_sec"`
+	ReadsLatencyUsP50 float64  `json:"reads_latency_us_p50"`
+	ReadsLatencyUsP95 float64  `json:"reads_latency_us_p95"`
+	ReadsLatencyUsP99 float64  `json:"reads_latency_us_p99"`
+	WritesTotal       uint64   `json:"writes_total"`
+	WritesPerSec      float64  `json:"writes_per_sec"`
+	WritesLatencyUsP50 float64 `json:"writes_latency_us_p50"`
+	WritesLatencyUsP95 float64 `json:"writes_latency_us_p95"`
+	WritesLatencyUsP99 float64 `json:"writes_latency_us_p99"`
+	RSSBytes          *uint64  `json:"rss_bytes,omitempty"`
 }
 
 func main() {
@@ -351,7 +385,7 @@ func main() {
 		*threads, warmupDuration, measureDuration)
 
 	var wg sync.WaitGroup
-	histograms := make([]*Histogram, *threads)
+	workerResults := make([]*WorkerResults, *threads)
 	for i := 0; i < *threads; i++ {
 		startIdx := i * opsPerThread
 		endIdx := startIdx + opsPerThread
@@ -362,18 +396,27 @@ func main() {
 		wg.Add(1)
 		go func(idx, start, end int) {
 			defer wg.Done()
-			histograms[idx] = worker(sm, allOps, start, end, warmupDuration, measureDuration, opsCounter)
+			workerResults[idx] = worker(sm, allOps, start, end, warmupDuration, measureDuration, opsCounter)
 		}(i, startIdx, endIdx)
 	}
 	wg.Wait()
 
-	mergedHist := NewHistogram()
-	for _, h := range histograms {
-		mergedHist.Merge(h)
+	mergedReadHist := NewHistogram()
+	mergedWriteHist := NewHistogram()
+	var totalReads uint64
+	var totalWrites uint64
+
+	for _, wr := range workerResults {
+		mergedReadHist.Merge(wr.readHist)
+		mergedWriteHist.Merge(wr.writeHist)
+		totalReads += wr.readCount
+		totalWrites += wr.writeCount
 	}
 
 	opsTotal := opsCounter.Load()
 	opsPerSec := float64(opsTotal) / *durationS
+	readsPerSec := float64(totalReads) / *durationS
+	writesPerSec := float64(totalWrites) / *durationS
 
 	hostname, _ := os.Hostname()
 	var hostnamePtr *string
@@ -404,12 +447,37 @@ func main() {
 			DurationS:        *durationS,
 		},
 		Metrics: Metrics{
-			OpsTotal:     opsTotal,
-			OpsPerSec:    opsPerSec,
-			LatencyUsP50: mergedHist.Percentile(50.0),
-			LatencyUsP95: mergedHist.Percentile(95.0),
-			LatencyUsP99: mergedHist.Percentile(99.0),
-			RSSBytes:     getRSSBytes(),
+			OpsTotal: opsTotal,
+			OpsPerSec: opsPerSec,
+			LatencyUsP50: func() float64 {
+				combined := NewHistogram()
+				combined.Merge(mergedReadHist)
+				combined.Merge(mergedWriteHist)
+				return combined.Percentile(50.0)
+			}(),
+			LatencyUsP95: func() float64 {
+				combined := NewHistogram()
+				combined.Merge(mergedReadHist)
+				combined.Merge(mergedWriteHist)
+				return combined.Percentile(95.0)
+			}(),
+			LatencyUsP99: func() float64 {
+				combined := NewHistogram()
+				combined.Merge(mergedReadHist)
+				combined.Merge(mergedWriteHist)
+				return combined.Percentile(99.0)
+			}(),
+			ReadsTotal:        totalReads,
+			ReadsPerSec:       readsPerSec,
+			ReadsLatencyUsP50: mergedReadHist.Percentile(50.0),
+			ReadsLatencyUsP95: mergedReadHist.Percentile(95.0),
+			ReadsLatencyUsP99: mergedReadHist.Percentile(99.0),
+			WritesTotal:        totalWrites,
+			WritesPerSec:      writesPerSec,
+			WritesLatencyUsP50: mergedWriteHist.Percentile(50.0),
+			WritesLatencyUsP95: mergedWriteHist.Percentile(95.0),
+			WritesLatencyUsP99: mergedWriteHist.Percentile(99.0),
+			RSSBytes:          getRSSBytes(),
 		},
 	}
 
