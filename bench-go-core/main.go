@@ -68,26 +68,42 @@ func (sm *ShardedMap) Set(code, url string) {
 	sm.shards[shardIdx].m[code] = url
 }
 
-// Histogram with fixed buckets (0-1000000 microseconds = 0-1 second)
+// Histogram with fine-grained buckets for accurate latency measurement
+// Uses 1μs buckets up to 10ms (10,000 buckets), then coarser buckets up to 1s
 type Histogram struct {
-	buckets [1001]uint64
-	total   uint64
-	mu      sync.Mutex
+	fineBuckets   []uint64 // 0-10ms in 1μs steps (10,000 buckets)
+	coarseBuckets []uint64 // 10ms-1s in 1ms steps (990 buckets)
+	total         uint64
+	mu            sync.Mutex
 }
 
 func NewHistogram() *Histogram {
-	return &Histogram{}
+	return &Histogram{
+		fineBuckets:   make([]uint64, 10000), // 0-10ms at 1μs resolution
+		coarseBuckets: make([]uint64, 990),   // 10ms-1s at 1ms resolution
+	}
 }
 
 func (h *Histogram) Record(us uint64) {
-	bucket := int(us / 1000)
-	if bucket > 1000 {
-		bucket = 1000
-	}
 	h.mu.Lock()
-	h.buckets[bucket]++
+	defer h.mu.Unlock()
+	if us < 10000 {
+		// Fine-grained: 1μs buckets
+		h.fineBuckets[us]++
+	} else if us < 1000000 {
+		// Coarse-grained: 1ms buckets (10ms to 1s)
+		bucket := int((us - 10000) / 1000)
+		if bucket < len(h.coarseBuckets) {
+			h.coarseBuckets[bucket]++
+		} else {
+			// Overflow: put in last bucket
+			h.coarseBuckets[len(h.coarseBuckets)-1]++
+		}
+	} else {
+		// > 1s: put in last bucket
+		h.coarseBuckets[len(h.coarseBuckets)-1]++
+	}
 	h.total++
-	h.mu.Unlock()
 }
 
 func (h *Histogram) Merge(other *Histogram) {
@@ -95,8 +111,11 @@ func (h *Histogram) Merge(other *Histogram) {
 	defer h.mu.Unlock()
 	other.mu.Lock()
 	defer other.mu.Unlock()
-	for i := range h.buckets {
-		h.buckets[i] += other.buckets[i]
+	for i := range h.fineBuckets {
+		h.fineBuckets[i] += other.fineBuckets[i]
+	}
+	for i := range h.coarseBuckets {
+		h.coarseBuckets[i] += other.coarseBuckets[i]
 	}
 	h.total += other.total
 }
@@ -109,14 +128,25 @@ func (h *Histogram) Percentile(p float64) float64 {
 	}
 	target := uint64(float64(h.total) * p / 100.0)
 	var count uint64
-	for i, bucketCount := range h.buckets {
+
+	// Check fine-grained buckets first
+	for i, bucketCount := range h.fineBuckets {
 		count += bucketCount
 		if count >= target {
-			// Return midpoint of bucket in microseconds
-			return float64(i*1000 + 500)
+			return float64(i) // Return exact microsecond value
 		}
 	}
-	// Fallback: return max bucket
+
+	// Check coarse-grained buckets
+	for i, bucketCount := range h.coarseBuckets {
+		count += bucketCount
+		if count >= target {
+			// Return midpoint of 1ms bucket
+			return float64(10000 + i*1000 + 500)
+		}
+	}
+
+	// Fallback: return max (1s)
 	return 1000000.0
 }
 
@@ -211,7 +241,10 @@ func worker(
 			sm.Set(op.Code, op.URL)
 		}
 		elapsed := time.Since(start)
-		hist.Record(uint64(elapsed.Microseconds()))
+		// Convert nanoseconds to microseconds with rounding
+		ns := elapsed.Nanoseconds()
+		us := (ns + 500) / 1000 // Round to nearest microsecond
+		hist.Record(uint64(us))
 		localOps++
 
 		opIdx++

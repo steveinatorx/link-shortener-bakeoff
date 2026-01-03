@@ -80,6 +80,16 @@ struct Metrics {
     latency_us_p50: f64,
     latency_us_p95: f64,
     latency_us_p99: f64,
+    reads_total: u64,
+    reads_per_sec: f64,
+    reads_latency_us_p50: f64,
+    reads_latency_us_p95: f64,
+    reads_latency_us_p99: f64,
+    writes_total: u64,
+    writes_per_sec: f64,
+    writes_latency_us_p50: f64,
+    writes_latency_us_p95: f64,
+    writes_latency_us_p99: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     rss_bytes: Option<u64>,
 }
@@ -97,30 +107,49 @@ fn fnv1a64(s: &str) -> u64 {
     hash
 }
 
-// Simple histogram with fixed buckets (0-1000000 microseconds = 0-1 second)
+// Histogram with fine-grained buckets for accurate latency measurement
+// Uses 1μs buckets up to 10ms (10,000 buckets), then coarser buckets up to 1s
 struct Histogram {
-    buckets: Vec<u64>,
+    fine_buckets: Vec<u64>,  // 0-10ms in 1μs steps (10,000 buckets)
+    coarse_buckets: Vec<u64>, // 10ms-1s in 1ms steps (990 buckets)
     total: u64,
 }
 
 impl Histogram {
     fn new() -> Self {
-        // 1000 buckets: 0-1ms, 1-2ms, ..., 999-1000ms, 1000ms+
         Self {
-            buckets: vec![0; 1001],
+            fine_buckets: vec![0; 10000],  // 0-10ms at 1μs resolution
+            coarse_buckets: vec![0; 990], // 10ms-1s at 1ms resolution
             total: 0,
         }
     }
     
     fn record(&mut self, us: u64) {
-        let bucket = (us / 1000).min(1000) as usize;
-        self.buckets[bucket] += 1;
+        if us < 10000 {
+            // Fine-grained: 1μs buckets
+            self.fine_buckets[us as usize] += 1;
+        } else if us < 1000000 {
+            // Coarse-grained: 1ms buckets (10ms to 1s)
+            let bucket = ((us - 10000) / 1000) as usize;
+            if bucket < self.coarse_buckets.len() {
+                self.coarse_buckets[bucket] += 1;
+            } else {
+                // Overflow: put in last bucket
+                *self.coarse_buckets.last_mut().unwrap() += 1;
+            }
+        } else {
+            // > 1s: put in last bucket
+            *self.coarse_buckets.last_mut().unwrap() += 1;
+        }
         self.total += 1;
     }
     
     fn merge(&mut self, other: &Self) {
-        for i in 0..self.buckets.len() {
-            self.buckets[i] += other.buckets[i];
+        for i in 0..self.fine_buckets.len() {
+            self.fine_buckets[i] += other.fine_buckets[i];
+        }
+        for i in 0..self.coarse_buckets.len() {
+            self.coarse_buckets[i] += other.coarse_buckets[i];
         }
         self.total += other.total;
     }
@@ -130,15 +159,26 @@ impl Histogram {
             return 0.0;
         }
         let target = (self.total as f64 * p / 100.0).ceil() as u64;
-        let mut count = 0;
-        for (i, &bucket_count) in self.buckets.iter().enumerate() {
+        let mut count = 0u64;
+        
+        // Check fine-grained buckets first
+        for (i, &bucket_count) in self.fine_buckets.iter().enumerate() {
             count += bucket_count;
             if count >= target {
-                // Return midpoint of bucket in microseconds
-                return (i * 1000 + 500) as f64;
+                return i as f64; // Return exact microsecond value
             }
         }
-        // Fallback: return max bucket
+        
+        // Check coarse-grained buckets
+        for (i, &bucket_count) in self.coarse_buckets.iter().enumerate() {
+            count += bucket_count;
+            if count >= target {
+                // Return midpoint of 1ms bucket
+                return (10000 + i * 1000 + 500) as f64;
+            }
+        }
+        
+        // Fallback: return max (1s)
         1000000.0
     }
 }
@@ -191,6 +231,14 @@ fn load_ops(path: &str) -> Vec<Op> {
     ops
 }
 
+struct WorkerResults {
+    read_hist: Histogram,
+    write_hist: Histogram,
+    read_count: u64,
+    write_count: u64,
+    total_ops: u64,
+}
+
 fn worker(
     maps: Arc<ShardedMap>,
     ops: Arc<Vec<Op>>,
@@ -199,8 +247,11 @@ fn worker(
     warmup_duration: Duration,
     measure_duration: Duration,
     ops_counter: Arc<AtomicU64>,
-) -> Histogram {
-    let mut histogram = Histogram::new();
+) -> WorkerResults {
+    let mut read_hist = Histogram::new();
+    let mut write_hist = Histogram::new();
+    let mut local_reads = 0u64;
+    let mut local_writes = 0u64;
     let mut local_ops = 0u64;
     
     let warmup_end = Instant::now() + warmup_duration;
@@ -242,7 +293,19 @@ fn worker(
             }
         }
         let elapsed = start.elapsed();
-        histogram.record(elapsed.as_micros() as u64);
+        // Convert nanoseconds to microseconds with rounding
+        let ns = elapsed.as_nanos();
+        let us = (ns + 500) / 1000; // Round to nearest microsecond
+        match op {
+            Op::Get(_) => {
+                read_hist.record(us as u64);
+                local_reads += 1;
+            }
+            Op::Set(_, _) => {
+                write_hist.record(us as u64);
+                local_writes += 1;
+            }
+        }
         local_ops += 1;
         
         op_idx += 1;
@@ -252,7 +315,13 @@ fn worker(
     }
     
     ops_counter.fetch_add(local_ops, Ordering::Relaxed);
-    histogram
+    WorkerResults {
+        read_hist,
+        write_hist,
+        read_count: local_reads,
+        write_count: local_writes,
+        total_ops: local_ops,
+    }
 }
 
 fn get_git_commit() -> String {
@@ -321,14 +390,23 @@ fn main() {
         handles.push(handle);
     }
     
-    let mut merged_histogram = Histogram::new();
+    let mut merged_read_hist = Histogram::new();
+    let mut merged_write_hist = Histogram::new();
+    let mut total_reads = 0u64;
+    let mut total_writes = 0u64;
+    
     for handle in handles {
-        let hist = handle.join().unwrap();
-        merged_histogram.merge(&hist);
+        let results = handle.join().unwrap();
+        merged_read_hist.merge(&results.read_hist);
+        merged_write_hist.merge(&results.write_hist);
+        total_reads += results.read_count;
+        total_writes += results.write_count;
     }
     
     let ops_total = ops_counter.load(Ordering::Relaxed);
     let ops_per_sec = ops_total as f64 / args.duration_s;
+    let reads_per_sec = total_reads as f64 / args.duration_s;
+    let writes_per_sec = total_writes as f64 / args.duration_s;
     
     let results = Results {
         meta: Meta {
@@ -355,9 +433,34 @@ fn main() {
         metrics: Metrics {
             ops_total,
             ops_per_sec,
-            latency_us_p50: merged_histogram.percentile(50.0),
-            latency_us_p95: merged_histogram.percentile(95.0),
-            latency_us_p99: merged_histogram.percentile(99.0),
+            latency_us_p50: {
+                let mut combined = Histogram::new();
+                combined.merge(&merged_read_hist);
+                combined.merge(&merged_write_hist);
+                combined.percentile(50.0)
+            },
+            latency_us_p95: {
+                let mut combined = Histogram::new();
+                combined.merge(&merged_read_hist);
+                combined.merge(&merged_write_hist);
+                combined.percentile(95.0)
+            },
+            latency_us_p99: {
+                let mut combined = Histogram::new();
+                combined.merge(&merged_read_hist);
+                combined.merge(&merged_write_hist);
+                combined.percentile(99.0)
+            },
+            reads_total: total_reads,
+            reads_per_sec,
+            reads_latency_us_p50: merged_read_hist.percentile(50.0),
+            reads_latency_us_p95: merged_read_hist.percentile(95.0),
+            reads_latency_us_p99: merged_read_hist.percentile(99.0),
+            writes_total: total_writes,
+            writes_per_sec,
+            writes_latency_us_p50: merged_write_hist.percentile(50.0),
+            writes_latency_us_p95: merged_write_hist.percentile(95.0),
+            writes_latency_us_p99: merged_write_hist.percentile(99.0),
             rss_bytes: get_rss_bytes(),
         },
     };
